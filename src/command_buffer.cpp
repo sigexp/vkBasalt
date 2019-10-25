@@ -31,7 +31,17 @@ namespace vkBasalt
         }
     
     }
-    void writeCASCommandBuffers(const VkDevice& device, const VkLayerDispatchTable& dispatchTable, const VkPipeline& pipeline, const VkPipelineLayout& layout, const VkExtent2D& extent, const uint32_t& count,const VkImage* images,const VkDescriptorSet& uniformBufferDescriptorSet, const VkDescriptorSet* descriptorSets, VkCommandBuffer* commandBuffers)
+    void writeCASCommandBuffers(const VkDevice& device,
+                                const VkLayerDispatchTable& dispatchTable,
+                                const VkPipeline& pipeline,
+                                const VkPipelineLayout& layout,
+                                const VkExtent2D& extent,
+                                const uint32_t& count,
+                                const VkImage* images,
+                                const VkDescriptorSet& uniformBufferDescriptorSet,
+                                const VkDescriptorSet* descriptorSets,
+                                VkCommandBuffer* commandBuffers,
+                                const VkImage imageDst)
     {
         /*
             general 
@@ -108,6 +118,33 @@ namespace vkBasalt
             //3
             std::cout << "before command buffer step 3" << std::endl;
             dispatchTable.CmdDispatch(commandBuffers[i],extent.width/8 +1,extent.height/8 +1 ,1);//cas shader has a localgroup size of 8
+
+            VkOffset3D blitSize;
+            blitSize.x = extent.width;
+            blitSize.y = extent.height;
+            blitSize.z = 1;
+            VkImageBlit blitRegion;
+            blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blitRegion.srcSubresource.mipLevel = 0;
+            blitRegion.srcSubresource.baseArrayLayer = 0;
+            blitRegion.srcSubresource.layerCount = 1;
+            blitRegion.srcOffsets[0] = VkOffset3D{0, 0, 0};
+            blitRegion.srcOffsets[1] = blitSize;
+            blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blitRegion.dstSubresource.mipLevel = 0;
+            blitRegion.dstSubresource.baseArrayLayer = 0;
+            blitRegion.dstSubresource.layerCount = 1;
+            blitRegion.dstOffsets[0] = VkOffset3D{0, 0, 0};
+            blitRegion.dstOffsets[1] = blitSize;
+
+            dispatchTable.CmdBlitImage(commandBuffers[i],
+                                       imageDst,
+                                       VK_IMAGE_LAYOUT_GENERAL,
+                                       images[i],
+                                       VK_IMAGE_LAYOUT_GENERAL,
+                                       1,
+                                       &blitRegion,
+                                       VK_FILTER_NEAREST);
             
             std::cout << "before command buffer step 4" << std::endl;
             //4

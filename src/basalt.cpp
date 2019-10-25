@@ -22,6 +22,7 @@
 #include "command_buffer.hpp"
 #include "buffer.hpp"
 #include "config.hpp"
+#include "memory.hpp"
 
 #ifndef ASSERT_VULKAN
 #define ASSERT_VULKAN(val)\
@@ -68,7 +69,9 @@ typedef struct {
     VkFormat format;
     uint32_t imageCount;
     VkImage *imageList;
+    VkImage imageDst;
     VkImageView *imageViewList;
+    VkImageView imageDstView;
     VkDescriptorSet *descriptorSetList;
     VkCommandBuffer *commandBufferList;
     VkSemaphore *semaphoreList;
@@ -314,9 +317,113 @@ VKAPI_ATTR void VKAPI_CALL vkBasalt_GetDeviceQueue(VkDevice device, uint32_t que
 
 VKAPI_ATTR VkResult VKAPI_CALL vkBasalt_CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain)
 {
+    VkResult res = VK_RESULT_MAX_ENUM;
     VkSwapchainCreateInfoKHR modifiedCreateInfo = *pCreateInfo;
     modifiedCreateInfo.imageUsage |= VK_IMAGE_USAGE_STORAGE_BIT;//we want to use the swapchain images as storage images
     scoped_lock l(globalLock);
+
+    VkLayerDispatchTable dispatch_table = device_dispatch[GetKey(device)];
+
+    VkImage imageDst;
+    VkImageView imageDstView;
+
+    VkExtent3D imageDstExtent;
+    imageDstExtent.width = pCreateInfo->imageExtent.width;
+    imageDstExtent.height = pCreateInfo->imageExtent.height;
+    imageDstExtent.depth = 1;
+
+    VkImageCreateInfo imageDstInfo;
+    imageDstInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageDstInfo.pNext = nullptr;
+    imageDstInfo.flags = pCreateInfo->flags;
+    imageDstInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageDstInfo.format = pCreateInfo->imageFormat;
+    imageDstInfo.extent = imageDstExtent;
+    imageDstInfo.mipLevels = 1;
+    imageDstInfo.arrayLayers = pCreateInfo->imageArrayLayers;
+    imageDstInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageDstInfo.tiling = VK_IMAGE_TILING_LINEAR;
+    imageDstInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+    imageDstInfo.sharingMode = pCreateInfo->imageSharingMode;
+    imageDstInfo.queueFamilyIndexCount = pCreateInfo->queueFamilyIndexCount;
+    imageDstInfo.pQueueFamilyIndices = pCreateInfo->pQueueFamilyIndices;
+    imageDstInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    res = vkCreateImage(device, &imageDstInfo, nullptr, &imageDst);
+    ASSERT_VULKAN(res);
+
+    VkMemoryRequirements imageDstMemReq;
+    vkGetImageMemoryRequirements(device, imageDst, &imageDstMemReq);
+
+    DeviceStruct& deviceStruct = deviceMap[device];
+    VkPhysicalDevice physDev = deviceStruct.physicalDevice;
+
+    VkMemoryAllocateInfo allocInfo;
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.pNext = nullptr;
+    allocInfo.allocationSize = imageDstMemReq.size;
+    allocInfo.memoryTypeIndex =
+       vkBasalt::findMemoryTypeIndex(instance_dispatch[GetKey(physDev)],
+                                     physDev,
+                                     imageDstMemReq.memoryTypeBits,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    VkDeviceMemory imageDstMem;
+    res = vkAllocateMemory(device, &allocInfo, nullptr, &imageDstMem);
+    ASSERT_VULKAN(res);
+
+    res = vkBindImageMemory(device, imageDst, imageDstMem, 0);
+    ASSERT_VULKAN(res);
+
+    vkBasalt::createImageViews(device,
+                               dispatch_table,
+                               modifiedCreateInfo.imageFormat,
+                               1,
+                               &imageDst,
+                               &imageDstView);
+
+    VkImageMemoryBarrier imageDstBarrier;
+    imageDstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imageDstBarrier.pNext = nullptr;
+    imageDstBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    imageDstBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
+                                    VK_ACCESS_SHADER_READ_BIT;
+    imageDstBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageDstBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageDstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageDstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageDstBarrier.image = imageDst;
+    imageDstBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageDstBarrier.subresourceRange.baseMipLevel = 0;
+    imageDstBarrier.subresourceRange.levelCount = 1;
+    imageDstBarrier.subresourceRange.baseArrayLayer = 0;
+    imageDstBarrier.subresourceRange.layerCount = 1;
+
+    VkCommandBuffer cmdBuffer;
+    vkBasalt::allocateCommandBuffer(device,
+                                    dispatch_table,
+                                    deviceMap[device].commandPool,
+                                    1,
+                                    &cmdBuffer);
+
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.pNext = nullptr;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+    beginInfo.pInheritanceInfo = nullptr;
+
+    dispatch_table.BeginCommandBuffer(cmdBuffer, &beginInfo);
+    dispatch_table.CmdPipelineBarrier(cmdBuffer,
+                                      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                      0,
+                                      0,
+                                      nullptr,
+                                      0,
+                                      nullptr,
+                                      1,
+                                      &imageDstBarrier);
+    dispatch_table.EndCommandBuffer(cmdBuffer);
     
     if(modifiedCreateInfo.oldSwapchain != VK_NULL_HANDLE)
     {
@@ -335,14 +442,19 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBasalt_CreateSwapchainKHR(VkDevice device, cons
     swapchainStruct.format = modifiedCreateInfo.imageFormat;
     swapchainStruct.imageCount = 0;
     swapchainStruct.imageList = nullptr;
+    swapchainStruct.imageDst = imageDst;
     swapchainStruct.imageViewList = nullptr;
+    swapchainStruct.imageDstView = imageDstView;
     swapchainStruct.descriptorSetList =nullptr;
     swapchainStruct.commandBufferList = nullptr;
     swapchainStruct.semaphoreList = nullptr;
     swapchainStruct.storageImageDescriptorPool = VK_NULL_HANDLE;
     std::cout << "device " << swapchainStruct.device << std::endl;
     
-    VkResult result = device_dispatch[GetKey(device)].CreateSwapchainKHR(device, &modifiedCreateInfo, pAllocator, pSwapchain);
+    VkResult result = dispatch_table.CreateSwapchainKHR(device,
+                                                        &modifiedCreateInfo,
+                                                        pAllocator,
+                                                        pSwapchain);
     
     swapchainMap[*pSwapchain] = swapchainStruct;
     std::cout << "format " << swapchainMap[*pSwapchain].format << std::endl;
@@ -387,11 +499,30 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBasalt_GetSwapchainImagesKHR(VkDevice device, V
     std::cout << "before creating descriptor Pool " << std::endl;
     vkBasalt::createStorageImageDescriptorPool(device, device_dispatch[GetKey(device)], swapchainStruct.imageCount, swapchainStruct.storageImageDescriptorPool);
     std::cout << "after creating descriptor Pool " << std::endl;
-    vkBasalt::allocateAndWriteStorageDescriptorSets(device, device_dispatch[GetKey(device)], swapchainStruct.storageImageDescriptorPool, swapchainStruct.imageCount, deviceStruct.storageImageDescriptorSetLayout, swapchainStruct.imageViewList, swapchainStruct.descriptorSetList);
+
+    vkBasalt::allocateAndWriteStorageDescriptorSets(device,
+                                                    device_dispatch[GetKey(device)],
+                                                    swapchainStruct.storageImageDescriptorPool,
+                                                    swapchainStruct.imageCount,
+                                                    deviceStruct.storageImageDescriptorSetLayout,
+                                                    swapchainStruct.imageViewList,
+                                                    swapchainStruct.imageDstView,
+                                                    swapchainStruct.descriptorSetList);
     
     vkBasalt::allocateCommandBuffer(device, device_dispatch[GetKey(device)], deviceMap[device].commandPool,swapchainStruct.imageCount , swapchainStruct.commandBufferList);
     std::cout << "after allocateCommandBuffer " << std::endl;
-    vkBasalt::writeCASCommandBuffers(device, device_dispatch[GetKey(device)], deviceStruct.casPipeline, deviceStruct.casPipelineLayout, swapchainStruct.imageExtent, swapchainStruct.imageCount,swapchainStruct.imageList,deviceStruct.casUniformBufferDescriptorSet, swapchainStruct.descriptorSetList, swapchainStruct.commandBufferList);
+    vkBasalt::writeCASCommandBuffers(device,
+                                     device_dispatch[GetKey(device)],
+                                     deviceStruct.casPipeline,
+                                     deviceStruct.casPipelineLayout,
+                                     swapchainStruct.imageExtent,
+                                     swapchainStruct.imageCount,
+                                     swapchainStruct.imageList,
+                                     deviceStruct.casUniformBufferDescriptorSet,
+                                     swapchainStruct.descriptorSetList,
+                                     swapchainStruct.commandBufferList,
+                                     swapchainStruct.imageDst);
+
     vkBasalt::createSemaphores(device, device_dispatch[GetKey(device)], swapchainStruct.imageCount, swapchainStruct.semaphoreList);
     for(unsigned int i=0;i<swapchainStruct.imageCount;i++)
         {

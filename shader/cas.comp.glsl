@@ -2,7 +2,8 @@
 
 layout(local_size_x=8, local_size_y=8, local_size_z=1) in;
 
-layout(set=0, binding=0, rgba8) uniform image2D img;
+layout(set=0, binding=0, rgba8) uniform readonly image2D img;
+layout(set=0, binding=1, rgba8) uniform writeonly image2D imgDst;
 layout(set=1, binding=0) uniform CasBufferObject{
     float sharpness;
 } cbo;
@@ -59,5 +60,5 @@ void main()
     vec3 window = (b + d) + (f + h);
     vec3 outColor = clamp((window * wRGB + e) * rcpWeightRGB,0,1);
     
-    imageStore(img,ivec2(gl_GlobalInvocationID.xy),vec4(outColor,alpha));
+    imageStore(imgDst,ivec2(gl_GlobalInvocationID.xy),vec4(outColor,alpha));
 }
